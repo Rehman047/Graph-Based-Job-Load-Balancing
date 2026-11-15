@@ -56,8 +56,15 @@ class MLPAgent(DDQNAgent):
         self.target_network.load_state_dict(self.q_network.state_dict())
         self.optimizer = torch.optim.Adam(self.q_network.parameters(), lr=lr)
 
-    def _q_values(self, state, adjacency=None):
-        return self.q_network(state)
+    def _encode(self, state, adjacency=None):
+        return state
+
+    def _network_input(self, state):
+        if state.ndim == 2:
+            return state.flatten().unsqueeze(0)
+        if state.ndim > 2:
+            return state.flatten(start_dim=1)
+        return state.flatten().unsqueeze(0)
 
 
 class GNNDQNAgent(DDQNAgent):
