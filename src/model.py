@@ -59,7 +59,13 @@ class QNetwork(nn.Module):
         )
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        return self.network(z.flatten(start_dim=1) if z.ndim > 1 else z.flatten().unsqueeze(0))
+        if z.ndim == 2:
+            z = z.flatten().unsqueeze(0)
+        elif z.ndim > 2:
+            z = z.flatten(start_dim=1)
+        else:
+            z = z.flatten().unsqueeze(0)
+        return self.network(z)
 
 
 class ReplayBuffer:
@@ -87,7 +93,7 @@ class DDQNAgent:
         self.gamma, self.epsilon, self.epsilon_min, self.epsilon_decay = 0.99, 0.9, 0.05, 0.995
         self.previous_distribution: np.ndarray | None = None
 
-    def _q_values(self, state: torch.Tensor, adjacency: torch.Tensor | None = None) -> torch.Tensor:
+    def _encode(self, state: torch.Tensor, adjacency: torch.Tensor | None = None) -> torch.Tensor:
         if state.ndim in (2, 3) and state.shape[-1] == 6:
             if state.ndim == 2:
                 if adjacency is None:
@@ -101,7 +107,13 @@ class DDQNAgent:
                         item_adjacency = build_adjacency(item.detach().cpu().numpy())
                     encoded.append(self.encoder(item, item_adjacency))
                 state = torch.stack(encoded)
-        return self.q_network(state)
+        return state
+
+    def _network_input(self, state: torch.Tensor) -> torch.Tensor:
+        return state
+
+    def _q_values(self, state: torch.Tensor, adjacency: torch.Tensor | None = None) -> torch.Tensor:
+        return self.q_network(self._network_input(self._encode(state, adjacency)))
 
     def select_action(self, state, valid_mask, adjacency: torch.Tensor | None = None, explore: bool = True) -> int | None:
         mask = np.asarray(valid_mask, dtype=bool)
@@ -130,8 +142,9 @@ class DDQNAgent:
         dones = torch.as_tensor(dones, dtype=torch.float32)
         current = self._q_values(states, adjacency).gather(1, actions.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
-            next_actions = self.q_network(next_states).argmax(dim=1)
-            target = self.target_network(next_states).gather(1, next_actions.unsqueeze(1)).squeeze(1)
+            encoded_next = self._network_input(self._encode(next_states, adjacency))
+            next_actions = self.q_network(encoded_next).argmax(dim=1)
+            target = self.target_network(encoded_next).gather(1, next_actions.unsqueeze(1)).squeeze(1)
             target = rewards + self.gamma * (1 - dones) * target
         loss = nn.functional.mse_loss(current, target)
         self.optimizer.zero_grad()
