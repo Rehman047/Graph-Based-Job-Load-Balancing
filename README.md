@@ -11,14 +11,17 @@ the CPU PyTorch wheel explicitly:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
 python -m pip install simpy numpy pandas matplotlib scipy
 ```
 
-Alternatively, install the dependencies listed in `requirements.txt`:
+The explicit CPU index avoids downloading the much larger CUDA distribution.
+If you already have a compatible PyTorch installation, install the remaining
+dependencies listed in `requirements.txt`:
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install simpy numpy pandas matplotlib scipy
 ```
 
 Download Alibaba traces from
