@@ -1,8 +1,8 @@
 """Training and evaluation entry points."""
 
 from pathlib import Path
+import argparse
 import pandas as pd
-import torch
 
 from .baselines import GNNDQNAgent, MLPAgent, RandomScheduler, RoundRobin, SJF
 from .env import GPUCluster, Job
@@ -26,8 +26,10 @@ def train(jobs: pd.DataFrame, cluster: GPUCluster, encoder, agent: DDQNAgent, re
             action = agent.select_action(state, cluster.valid_mask(job), adjacency)
             cluster.step(action, job)
             next_state = cluster.get_state()
-            reward = 0.6 * (1 - s_dolb(next_state)) + 0.4 * (1 - avg_waiting_time(cluster.jobs) / 10)
-            replay_buffer.push(state, action or 0, reward, next_state, position == len(jobs) - 1)
+            waiting_component = 1.0 / (1.0 + avg_waiting_time(cluster.jobs))
+            reward = 0.6 * (1 - s_dolb(next_state)) + 0.4 * waiting_component
+            if action is not None:
+                replay_buffer.push(state, action, reward, next_state, position == len(jobs) - 1)
             if len(replay_buffer) >= 256:
                 agent.learn(replay_buffer.sample())
             agent.maybe_update_target(next_state)
@@ -54,28 +56,82 @@ def evaluate(scheduler, jobs: pd.DataFrame, cluster: GPUCluster):
     return s_dolb(state), sum(scores) / len(scores) if scores else 0.0, avg_waiting_time(cluster.jobs)
 
 
-def main():
-    from .data_loader import load_traces
-    from .plots import print_results_table
+def _methods(num_vms):
+    return {
+        "GNN-DDQN": DDQNAgent(num_vms=num_vms),
+        "MLP-DDQN": MLPAgent(num_vms=num_vms),
+        "GNN-DQN": GNNDQNAgent(num_vms=num_vms),
+    }
 
-    normal, _ = load_traces()
-    cluster = GPUCluster()
-    agent = DDQNAgent(num_vms=len(cluster.vms))
-    rewards, waits = train(normal, cluster, agent.encoder, agent, ReplayBuffer(), episodes=1000)
+
+def _evaluate_methods(jobs, cluster, agents):
     methods = {
-        "GNN-DDQN": agent,
-        "MLP-DDQN": MLPAgent(len(cluster.vms)),
-        "GNN-DQN": GNNDQNAgent(len(cluster.vms)),
+        **agents,
         "RR": RoundRobin(),
         "Random": RandomScheduler(),
         "SJF": SJF(),
     }
-    results = {name: dict(zip(("s_dolb", "bsld", "avg_waiting_time"), evaluate(scheduler, normal, cluster))) for name, scheduler in methods.items()}
-    Path("experiments/results").mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(results).T.to_csv("experiments/results/evaluation.csv")
-    print_results_table(results)
-    return rewards, waits
+    return {
+        name: dict(zip(("s_dolb", "bsld", "avg_waiting_time"), evaluate(scheduler, jobs, cluster)))
+        for name, scheduler in methods.items()
+    }
+
+
+def _train_methods(jobs, cluster, episodes):
+    agents = _methods(len(cluster.vms))
+    histories = {}
+    for name, agent in agents.items():
+        rewards, waits = train(jobs, cluster, agent.encoder, agent, ReplayBuffer(), episodes)
+        histories[name] = (rewards, waits)
+    return agents, histories
+
+
+def _priority_jobs(jobs):
+    return jobs.sort_values("gpu", ascending=False, kind="stable").reset_index(drop=True)
+
+
+def run_experiments(normal, intensive, episodes=1000, vm_counts=(10, 20, 30), output_dir="experiments/results"):
+    from .plots import plot_reward_convergence, plot_waiting_time_convergence, print_results_table
+
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    all_results = {}
+    all_histories = {}
+    for workload_name, jobs in (("normal", normal), ("intensive", intensive)):
+        cluster = GPUCluster()
+        agents, histories = _train_methods(jobs, cluster, episodes)
+        results = _evaluate_methods(jobs, cluster, agents)
+        all_results[workload_name] = results
+        all_histories[workload_name] = histories
+        pd.DataFrame(results).T.to_csv(output / f"{workload_name}_evaluation.csv")
+        print(f"\n{workload_name.title()} workload")
+        print_results_table(results)
+        plot_reward_convergence({name: values[0] for name, values in histories.items()},
+                                output / f"{workload_name}_reward_convergence.png")
+        plot_waiting_time_convergence({name: values[1] for name, values in histories.items()},
+                                      output / f"{workload_name}_waiting_time_convergence.png")
+
+        priority_results = _evaluate_methods(_priority_jobs(jobs), cluster, agents)
+        all_results[f"{workload_name}_gpu_priority"] = priority_results
+        pd.DataFrame(priority_results).T.to_csv(output / f"{workload_name}_gpu_priority.csv")
+
+    generalization = {}
+    for count in vm_counts:
+        cluster = GPUCluster(n_per_type=count)
+        agents, _ = _train_methods(normal, cluster, episodes)
+        generalization[count] = _evaluate_methods(normal, cluster, agents)
+    pd.Series(generalization).to_json(output / "generalization.json")
+    return all_results, all_histories, generalization
+
+
+def main(episodes=1000):
+    from .data_loader import load_traces
+
+    return run_experiments(*load_traces(), episodes=episodes)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Train and evaluate all scheduling experiments.")
+    parser.add_argument("--episodes", type=int, default=1000)
+    args = parser.parse_args()
+    main(episodes=args.episodes)
