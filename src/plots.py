@@ -8,8 +8,9 @@ RESULTS = Path("experiments/results")
 
 
 def _save(name):
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    path = RESULTS / name
+    requested = Path(name)
+    path = requested if requested.is_absolute() or requested.parent != Path(".") else RESULTS / requested
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout()
     plt.savefig(path)
     plt.close()

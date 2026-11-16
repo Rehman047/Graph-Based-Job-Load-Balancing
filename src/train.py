@@ -40,8 +40,9 @@ def train(jobs: pd.DataFrame, cluster: GPUCluster, encoder, agent: DDQNAgent, re
     return rewards, waiting
 
 
-def evaluate(scheduler, jobs: pd.DataFrame, cluster: GPUCluster):
+def evaluate(scheduler, jobs: pd.DataFrame, cluster: GPUCluster, collect_utilization=False):
     cluster.reset()
+    utilization_samples = []
     for _, row in jobs.iterrows():
         job = _job(row)
         state = cluster.get_state()
@@ -50,10 +51,19 @@ def evaluate(scheduler, jobs: pd.DataFrame, cluster: GPUCluster):
         else:
             action = scheduler.select(cluster, job)
         cluster.step(action, job)
+        utilization_samples.append(cluster.get_state()[:, :3].mean(axis=0))
     cluster.run()
     state = cluster.get_state()
     scores = [bsld(job.waiting_time, job.duration) for job in cluster.jobs]
-    return s_dolb(state), sum(scores) / len(scores) if scores else 0.0, avg_waiting_time(cluster.jobs)
+    metrics = (s_dolb(state), sum(scores) / len(scores) if scores else 0.0, avg_waiting_time(cluster.jobs))
+    if not collect_utilization:
+        return metrics
+    utilization = (
+        sum(utilization_samples) / len(utilization_samples)
+        if utilization_samples
+        else [0.0, 0.0, 0.0]
+    )
+    return metrics, utilization
 
 
 def _methods(num_vms):
@@ -64,17 +74,22 @@ def _methods(num_vms):
     }
 
 
-def _evaluate_methods(jobs, cluster, agents):
+def _evaluate_methods(jobs, cluster, agents, collect_utilization=False):
     methods = {
         **agents,
         "RR": RoundRobin(),
         "Random": RandomScheduler(),
         "SJF": SJF(),
     }
-    return {
-        name: dict(zip(("s_dolb", "bsld", "avg_waiting_time"), evaluate(scheduler, jobs, cluster)))
-        for name, scheduler in methods.items()
-    }
+    results = {}
+    utilization = {}
+    for name, scheduler in methods.items():
+        evaluation = evaluate(scheduler, jobs, cluster, collect_utilization)
+        metrics = evaluation[0] if collect_utilization else evaluation
+        results[name] = dict(zip(("s_dolb", "bsld", "avg_waiting_time"), metrics))
+        if collect_utilization:
+            utilization[name] = evaluation[1]
+    return (results, utilization) if collect_utilization else results
 
 
 def _train_methods(jobs, cluster, episodes):
@@ -91,7 +106,12 @@ def _priority_jobs(jobs):
 
 
 def run_experiments(normal, intensive, episodes=1000, vm_counts=(10, 20, 30), output_dir="experiments/results"):
-    from .plots import plot_reward_convergence, plot_waiting_time_convergence, print_results_table
+    from .plots import (
+        plot_reward_convergence,
+        plot_utilization_bars,
+        plot_waiting_time_convergence,
+        print_results_table,
+    )
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -100,7 +120,7 @@ def run_experiments(normal, intensive, episodes=1000, vm_counts=(10, 20, 30), ou
     for workload_name, jobs in (("normal", normal), ("intensive", intensive)):
         cluster = GPUCluster()
         agents, histories = _train_methods(jobs, cluster, episodes)
-        results = _evaluate_methods(jobs, cluster, agents)
+        results, utilization = _evaluate_methods(jobs, cluster, agents, collect_utilization=True)
         all_results[workload_name] = results
         all_histories[workload_name] = histories
         pd.DataFrame(results).T.to_csv(output / f"{workload_name}_evaluation.csv")
@@ -110,6 +130,7 @@ def run_experiments(normal, intensive, episodes=1000, vm_counts=(10, 20, 30), ou
                                 output / f"{workload_name}_reward_convergence.png")
         plot_waiting_time_convergence({name: values[1] for name, values in histories.items()},
                                       output / f"{workload_name}_waiting_time_convergence.png")
+        plot_utilization_bars(utilization, output / f"{workload_name}_utilization.png")
 
         priority_results = _evaluate_methods(_priority_jobs(jobs), cluster, agents)
         all_results[f"{workload_name}_gpu_priority"] = priority_results
