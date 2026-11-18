@@ -20,6 +20,7 @@ def _save(name):
 def plot_reward_convergence(rewards, filename="reward_convergence.png"):
     for name, values in rewards.items():
         plt.plot(values, label=name)
+    plt.title("Cumulative Reward Convergence")
     plt.xlabel("Episode"); plt.ylabel("Cumulative reward"); plt.legend()
     return _save(filename)
 
@@ -27,6 +28,7 @@ def plot_reward_convergence(rewards, filename="reward_convergence.png"):
 def plot_waiting_time_convergence(waiting_times, filename="waiting_time_convergence.png"):
     for name, values in waiting_times.items():
         plt.plot(values, label=name)
+    plt.title("Average Waiting Time Convergence")
     plt.xlabel("Episode"); plt.ylabel("Average waiting time"); plt.legend()
     return _save(filename)
 
@@ -37,6 +39,7 @@ def plot_utilization_bars(utilization, filename="utilization.png"):
     x = np.arange(len(names)); width = 0.25
     for index, label in enumerate(("GPU", "CPU", "Memory")):
         plt.bar(x + (index - 1) * width, values[:, index], width, label=label)
+    plt.title("Average Resource Utilization by Method")
     plt.xticks(x, names); plt.ylabel("Utilization"); plt.legend()
     return _save(filename)
 
