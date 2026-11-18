@@ -21,6 +21,8 @@ def train(jobs: pd.DataFrame, cluster: GPUCluster, encoder, agent: DDQNAgent, re
         episode_reward = 0.0
         for position, (_, row) in enumerate(jobs.iterrows()):
             job = _job(row)
+            if job.arrival_time > cluster.env.now:
+                cluster.env.run(until=job.arrival_time)
             state = cluster.get_state()
             adjacency = build_adjacency(state)
             action = agent.select_action(state, cluster.valid_mask(job), adjacency)
@@ -43,19 +45,28 @@ def train(jobs: pd.DataFrame, cluster: GPUCluster, encoder, agent: DDQNAgent, re
 def evaluate(scheduler, jobs: pd.DataFrame, cluster: GPUCluster, collect_utilization=False):
     cluster.reset()
     utilization_samples = []
+    state_snapshots = []
     for _, row in jobs.iterrows():
         job = _job(row)
+        if job.arrival_time > cluster.env.now:
+            cluster.env.run(until=job.arrival_time)
         state = cluster.get_state()
         if hasattr(scheduler, "select_action"):
             action = scheduler.select_action(state, cluster.valid_mask(job), explore=False)
         else:
             action = scheduler.select(cluster, job)
         cluster.step(action, job)
-        utilization_samples.append(cluster.get_state()[:, :3].mean(axis=0))
+        post_state = cluster.get_state()
+        state_snapshots.append(post_state)
+        utilization_samples.append(post_state[:, :3].mean(axis=0))
     cluster.run()
-    state = cluster.get_state()
     scores = [bsld(job.waiting_time, job.duration) for job in cluster.jobs]
-    metrics = (s_dolb(state), sum(scores) / len(scores) if scores else 0.0, avg_waiting_time(cluster.jobs))
+    mean_s_dolb = (
+        float(sum(s_dolb(snapshot) for snapshot in state_snapshots) / len(state_snapshots))
+        if state_snapshots
+        else 0.0
+    )
+    metrics = (mean_s_dolb, sum(scores) / len(scores) if scores else 0.0, avg_waiting_time(cluster.jobs))
     if not collect_utilization:
         return metrics
     utilization = (

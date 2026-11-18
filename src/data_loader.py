@@ -57,8 +57,8 @@ def _load_v2023(path: Path) -> pd.DataFrame:
             "gpu": pd.to_numeric(frame["num_gpu"], errors="coerce"),
             "cpu": pd.to_numeric(frame["cpu_milli"], errors="coerce") / 1000,
             "mem": pd.to_numeric(frame["memory_mib"], errors="coerce") / 1024,
-            "duration_raw": pd.to_numeric(frame["scheduled_time"], errors="coerce")
-            - pd.to_numeric(frame["deletion_time"], errors="coerce"),
+            "duration_raw": pd.to_numeric(frame["deletion_time"], errors="coerce")
+            - pd.to_numeric(frame["scheduled_time"], errors="coerce"),
             "arrival_time": pd.to_numeric(frame["scheduled_time"], errors="coerce"),
         }
     )
@@ -77,8 +77,16 @@ def load_traces(data_dir: str | Path = "data") -> tuple[pd.DataFrame, pd.DataFra
         combined = _synthetic_jobs(1000, seed=7)
     if combined.empty:
         combined = _synthetic_jobs(1000, seed=7)
-    normal = combined.sample(n=500, replace=len(combined) < 500, random_state=7).reset_index(drop=True)
-    intensive = combined.sample(n=1000, replace=len(combined) < 1000, random_state=8).reset_index(drop=True)
+    normal = (
+        combined.sample(n=500, replace=len(combined) < 500, random_state=7)
+        .sort_values("arrival_time", kind="stable")
+        .reset_index(drop=True)
+    )
+    intensive = (
+        combined.sample(n=1000, replace=len(combined) < 1000, random_state=8)
+        .sort_values("arrival_time", kind="stable")
+        .reset_index(drop=True)
+    )
     return normal, intensive
 
 

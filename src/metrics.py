@@ -9,7 +9,8 @@ def s_dolb(state: np.ndarray) -> float:
 
 
 def bsld(waiting_time: float, execution_time: float, tau: float | None = None) -> float:
-    scale = max(execution_time, 10.0) if tau is None else tau
+    threshold = 10.0 if tau is None else tau
+    scale = max(execution_time, threshold)
     if scale <= 0:
         return 1.0
     return max((waiting_time + execution_time) / scale, 1.0)

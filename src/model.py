@@ -14,6 +14,7 @@ def build_adjacency(state: np.ndarray, alpha: float = 0.4, beta: float = 0.3, ga
     utilization = state[:, :3]
     distance = np.abs(utilization[:, None, :] - utilization[None, :, :])
     adjacency = 1.0 / (1.0 + alpha * distance[:, :, 0] + beta * distance[:, :, 1] + gamma * distance[:, :, 2])
+    np.fill_diagonal(adjacency, 0.0)
     adjacency += np.eye(len(state), dtype=np.float32)
     degree = adjacency.sum(axis=1)
     normalized = adjacency / np.sqrt(degree[:, None] * degree[None, :])
