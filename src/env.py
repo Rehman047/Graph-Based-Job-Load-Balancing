@@ -110,7 +110,21 @@ class GPUCluster:
     def _run_job(self, vm: VM, job: Job):
         yield self.env.timeout(max(0.0, job.duration))
         vm.release(job)
-        job.finish_time = self.env.now
+        job.finish_time = float(self.env.now)
+        self._drain_pending_queue()
+
+    def _drain_pending_queue(self) -> None:
+        remaining_queue = []
+        for job in self.pending_queue:
+            fitting_vms = [vm for vm in self.vms if vm.can_fit(job)]
+            if fitting_vms:
+                best_vm = min(fitting_vms, key=lambda vm: vm.total_usage)
+                job.start_time = float(self.env.now)
+                best_vm.allocate(job)
+                self.env.process(self._run_job(best_vm, job))
+            else:
+                remaining_queue.append(job)
+        self.pending_queue = remaining_queue
 
     def step(self, vm_index: int | None, job: Job) -> None:
         if vm_index is None:
