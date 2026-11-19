@@ -54,12 +54,22 @@ class VM:
         return self.gpu_used / self.gpu_capacity + self.cpu_used / self.cpu_capacity + self.mem_used / self.mem_capacity
 
 
+class ClusterEnvironment(simpy.Environment):
+    def run(self, until: Any | None = None) -> Any:
+        if until is not None and not isinstance(until, simpy.events.Event):
+            if float(until) <= self.now:
+                while self._queue and self._queue[0][0] <= self.now:
+                    self.step()
+                return None
+        return super().run(until=until)
+
+
 class GPUCluster:
     NODE_TYPES = ((4, 8, 16), (8, 16, 32), (16, 32, 64))
 
     def __init__(self, n_per_type: int = 10, env: Any | None = None) -> None:
         self.n_per_type = n_per_type
-        self.env = env or simpy.Environment()
+        self.env = env or ClusterEnvironment()
         self.vms: list[VM] = []
         self.jobs: list[Job] = []
         self.reset()
@@ -69,7 +79,7 @@ class GPUCluster:
         return self.vms
 
     def reset(self) -> None:
-        self.env = simpy.Environment()
+        self.env = ClusterEnvironment()
         self.vms = [
             VM(*node_type, name=f"T{type_index + 1}-{instance}")
             for type_index, node_type in enumerate(self.NODE_TYPES)
