@@ -23,7 +23,7 @@ def _synthetic_jobs(count: int, seed: int) -> pd.DataFrame:
             "cpu": rng.uniform(1, 8, count),
             "mem": rng.uniform(2, 16, count),
             "duration": rng.uniform(0.5, 10, count),
-            "arrival_time": np.arange(count, dtype=float),
+            "arrival_time": np.arange(count, dtype=float) * 0.025,
         }
     )
 
@@ -72,6 +72,10 @@ def load_traces(data_dir: str | Path = "data") -> tuple[pd.DataFrame, pd.DataFra
     try:
         first = _load_v2020(root / "v2020" / "pai_task_table.csv")
         second = _load_v2023(root / "v2023" / "openb_pod_list_default.csv")
+        if not first.empty and "arrival_time" in first.columns:
+            first["arrival_time"] = (first["arrival_time"] - first["arrival_time"].min()) * 0.025
+        if not second.empty and "arrival_time" in second.columns:
+            second["arrival_time"] = (second["arrival_time"] - second["arrival_time"].min()) * 0.025
         combined = pd.concat([first, second], ignore_index=True)
     except (FileNotFoundError, pd.errors.EmptyDataError, OSError, ValueError):
         combined = _synthetic_jobs(1000, seed=7)
