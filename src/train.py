@@ -27,6 +27,7 @@ def train(jobs: pd.DataFrame, cluster: GPUCluster, encoder, agent: DDQNAgent, re
             adjacency = build_adjacency(state)
             action = agent.select_action(state, cluster.valid_mask(job), adjacency)
             cluster.step(action, job)
+            cluster.env.run(until=cluster.env.now)
             next_state = cluster.get_state()
             waiting_component = 1.0 / (1.0 + avg_waiting_time(cluster.jobs))
             reward = 0.6 * (1 - s_dolb(next_state)) + 0.4 * waiting_component
@@ -56,6 +57,7 @@ def evaluate(scheduler, jobs: pd.DataFrame, cluster: GPUCluster, collect_utiliza
         else:
             action = scheduler.select(cluster, job)
         cluster.step(action, job)
+        cluster.env.run(until=cluster.env.now)
         post_state = cluster.get_state()
         state_snapshots.append(post_state)
         utilization_samples.append(post_state[:, :3].mean(axis=0))
