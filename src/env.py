@@ -72,6 +72,7 @@ class GPUCluster:
         self.env = env or ClusterEnvironment()
         self.vms: list[VM] = []
         self.jobs: list[Job] = []
+        self.pending_queue: list[Job] = []
         self.reset()
 
     @property
@@ -86,6 +87,7 @@ class GPUCluster:
             for instance in range(self.n_per_type)
         ]
         self.jobs = []
+        self.pending_queue = []
 
     def get_state(self) -> np.ndarray:
         rows = []
@@ -113,6 +115,7 @@ class GPUCluster:
     def step(self, vm_index: int | None, job: Job) -> None:
         if vm_index is None:
             self.jobs.append(job)
+            self.pending_queue.append(job)
             return
         if vm_index < 0 or vm_index >= len(self.vms) or not self.vms[vm_index].can_fit(job):
             raise ValueError("invalid VM index or job does not fit")
