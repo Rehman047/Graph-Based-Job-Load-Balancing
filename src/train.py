@@ -3,6 +3,7 @@
 from collections import deque
 from pathlib import Path
 import argparse
+import hashlib
 import random
 import sys
 import time
@@ -22,6 +23,16 @@ def _job(row) -> Job:
 
 def get_checkpoint_dir(checkpoint_root: str | Path, workload: str, n_per_type: int, agent_name: str) -> Path:
     return Path(checkpoint_root) / f"{workload}_{n_per_type}x3_{agent_name}"
+
+
+def compute_trace_fingerprint(jobs: pd.DataFrame) -> str:
+    """Compute a deterministic hash of the job trace."""
+    cols = ["gpu", "cpu", "mem", "duration", "arrival_time"]
+    rounded = jobs[cols].round(4).to_numpy()
+    hasher = hashlib.sha256()
+    hasher.update(str(len(jobs)).encode("utf-8"))
+    hasher.update(rounded.tobytes())
+    return hasher.hexdigest()[:16]
 
 
 def save_checkpoint(path: Path, payload: dict) -> None:
@@ -50,14 +61,29 @@ def set_rng_states(states: dict) -> None:
 
 def validate_config(saved_config: dict, current_config: dict) -> None:
     mismatches = []
-    for key in ("workload", "num_vms", "agent_name"):
-        if saved_config.get(key) != current_config.get(key):
+    fields = [
+        ("workload", "workload"),
+        ("num_vms", "number of VMs"),
+        ("n_per_type", "VMs per tier"),
+        ("agent_name", "agent name"),
+        ("lr", "learning rate"),
+        ("gamma", "discount factor (gamma)"),
+        ("train_freq", "train frequency"),
+        ("batch_size", "batch size"),
+        ("buffer_capacity", "buffer capacity"),
+        ("trace_fingerprint", "trace fingerprint"),
+        ("num_jobs", "number of jobs"),
+    ]
+    for key, label in fields:
+        if key in saved_config and saved_config[key] != current_config.get(key):
             mismatches.append(
-                f"{key}: checkpoint has '{saved_config.get(key)}', current run has '{current_config.get(key)}'"
+                f"{label} ({key}): checkpoint has '{saved_config[key]}', current run has '{current_config.get(key)}'"
             )
     if mismatches:
         raise ValueError(
-            "Checkpoint configuration mismatch! Cannot resume:\n  " + "\n  ".join(mismatches)
+            "Checkpoint configuration mismatch! Cannot resume:\n  - "
+            + "\n  - ".join(mismatches)
+            + "\n\nPlease use matching settings, a different --checkpoint-dir, or use --overwrite to start fresh."
         )
 
 
@@ -131,9 +157,13 @@ def train(
         "num_vms": len(cluster.vms),
         "n_per_type": cluster.n_per_type,
         "agent_name": agent_name,
-        "lr": getattr(agent, "lr", 1e-3),
+        "lr": agent.optimizer.param_groups[0]["lr"],
         "gamma": agent.gamma,
         "train_freq": train_freq,
+        "batch_size": 256,
+        "buffer_capacity": replay_buffer.buffer.maxlen if hasattr(replay_buffer, "buffer") else 10000,
+        "trace_fingerprint": compute_trace_fingerprint(jobs),
+        "num_jobs": len(jobs),
     }
 
     start_episode = 0
@@ -151,27 +181,57 @@ def train(
             replay_buffer.buffer = deque(payload["replay_buffer"], maxlen=replay_buffer.buffer.maxlen)
             set_rng_states(payload["rng_states"])
             start_episode = payload["completed_episodes"]
-            best_score = payload.get("best_score", -float("inf"))
+            best_score = payload.get("best_score", payload.get("score", -float("inf")))
+            epsilon_decay_episodes = payload.get(
+                "epsilon_decay_episodes", max(1, int(0.4 * episodes) if episodes <= 4 else round(0.4 * episodes))
+            )
             clean_csv_logs(train_csv, eval_csv, start_episode)
             print(
                 f"Resumed from {latest_path}: {start_episode} episodes completed, "
-                f"current epsilon={agent.epsilon:.4f}, best score so far={best_score:.4f}"
+                f"current epsilon={agent.epsilon:.4f}, best score so far={best_score:.4f}, "
+                f"epsilon decay window: {epsilon_decay_episodes} episodes (fixed at first start)"
             )
         elif overwrite:
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             for p in (latest_path, best_path, train_csv, eval_csv):
                 if p.exists():
                     p.unlink()
+            start_episode = 0
+            best_score = -float("inf")
+            epsilon_decay_episodes = max(1, int(0.4 * episodes) if episodes <= 4 else round(0.4 * episodes))
     else:
+        if resume:
+            print(f"No checkpoint found at {latest_path}, starting from scratch.")
         ckpt_dir.mkdir(parents=True, exist_ok=True)
+        for p in (train_csv, eval_csv):
+            if p.exists():
+                p.unlink()
+        start_episode = 0
+        best_score = -float("inf")
+        epsilon_decay_episodes = max(1, int(0.4 * episodes) if episodes <= 4 else round(0.4 * episodes))
 
     def make_payload(completed_eps: int, b_score: float) -> dict:
         return {
             "config": current_config,
             "completed_episodes": completed_eps,
+            "epsilon_decay_episodes": epsilon_decay_episodes,
             "agent_state": agent.get_state(),
             "replay_buffer": list(replay_buffer.buffer),
             "rng_states": get_rng_states(),
+            "best_score": b_score,
+        }
+
+    def make_best_payload(completed_eps: int, b_score: float) -> dict:
+        return {
+            "config": current_config,
+            "completed_episodes": completed_eps,
+            "epsilon_decay_episodes": epsilon_decay_episodes,
+            "agent_state": {
+                "encoder": agent.encoder.state_dict(),
+                "q_network": agent.q_network.state_dict(),
+                "target_network": agent.target_network.state_dict(),
+            },
+            "score": b_score,
             "best_score": b_score,
         }
 
@@ -183,7 +243,7 @@ def train(
         if best_path.exists():
             best_payload = torch.load(best_path, map_location="cpu", weights_only=False)
             agent.load_state(best_payload["agent_state"])
-            print(f"Loaded best checkpoint from {best_path} (score: {best_payload.get('best_score', 0.0):.4f}) for evaluation.")
+            print(f"Loaded best checkpoint from {best_path} (score: {best_payload.get('best_score', best_payload.get('score', 0.0)):.4f}) for evaluation.")
         rewards, waiting = [], []
         if train_csv.exists() and train_csv.stat().st_size > 0:
             df = pd.read_csv(train_csv)
@@ -195,7 +255,7 @@ def train(
     try:
         for ep in range(start_episode, episodes):
             ep_start = time.perf_counter()
-            agent.update_epsilon(ep, episodes)
+            agent.update_epsilon(ep, epsilon_decay_episodes)
             cluster.reset()
             episode_reward = 0.0
             episode_losses = []
@@ -246,7 +306,7 @@ def train(
                 is_best = score > best_score
                 if is_best:
                     best_score = score
-                    save_checkpoint(best_path, make_payload(completed_ep, best_score))
+                    save_checkpoint(best_path, make_best_payload(completed_ep, best_score))
                     print(f"[*] New best model saved at episode {completed_ep} with score: {best_score:.4f}")
                 log_eval_step(eval_csv, {
                     "episode": completed_ep,
@@ -273,14 +333,14 @@ def train(
         print(f"\n[Interrupted] Ctrl+C received during episode {ep + 1}. Saving checkpoint for {agent_name} at completed episode {completed_ep}...")
         clean_csv_logs(train_csv, eval_csv, completed_ep)
         save_checkpoint(latest_path, make_payload(completed_ep, best_score))
-        print(f"Successfully saved {latest_path}. Exiting cleanly.")
-        sys.exit(0)
+        print(f"Successfully saved {latest_path}. Exiting.")
+        sys.exit(130)
 
     # Load best model if exists for final evaluation
     if best_path.exists():
         best_payload = torch.load(best_path, map_location="cpu", weights_only=False)
         agent.load_state(best_payload["agent_state"])
-        print(f"Loaded best checkpoint from {best_path} (eval score: {best_payload.get('best_score', 0.0):.4f}) for evaluation.")
+        print(f"Loaded best checkpoint from {best_path} (eval score: {best_payload.get('best_score', best_payload.get('score', 0.0)):.4f}) for evaluation.")
 
     rewards, waiting = [], []
     if train_csv.exists() and train_csv.stat().st_size > 0:
