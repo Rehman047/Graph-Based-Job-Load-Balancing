@@ -129,8 +129,42 @@ class DDQNAgent:
         self.target_network = deepcopy(self.q_network)
         self.target_network.load_state_dict(self.q_network.state_dict())
         self.optimizer = torch.optim.Adam(list(self.encoder.parameters()) + list(self.q_network.parameters()), lr=lr)
-        self.gamma, self.epsilon, self.epsilon_min, self.epsilon_decay = 0.99, 0.9, 0.05, 0.995
+        # Paper specifies gamma = 0.9 (Section IV-A)
+        self.gamma, self.epsilon, self.epsilon_min, self.epsilon_decay = 0.9, 0.9, 0.05, 0.995
         self.previous_distribution: np.ndarray | None = None
+
+    def update_epsilon(self, episode_idx: int, decay_episodes: int) -> float:
+        # Note: The paper only states that epsilon "decays over time" without giving a specific schedule.
+        decay_ep = max(1, decay_episodes)
+        if episode_idx < decay_ep:
+            self.epsilon = 0.9 - (0.9 - 0.05) * (episode_idx / decay_ep)
+        else:
+            self.epsilon = 0.05
+        return self.epsilon
+
+    def get_state(self) -> dict:
+        return {
+            "encoder": self.encoder.state_dict(),
+            "q_network": self.q_network.state_dict(),
+            "target_network": self.target_network.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "epsilon": self.epsilon,
+            "previous_distribution": self.previous_distribution,
+        }
+
+    def load_state(self, state: dict) -> None:
+        if "encoder" in state:
+            self.encoder.load_state_dict(state["encoder"])
+        if "q_network" in state:
+            self.q_network.load_state_dict(state["q_network"])
+        if "target_network" in state:
+            self.target_network.load_state_dict(state["target_network"])
+        if "optimizer" in state:
+            self.optimizer.load_state_dict(state["optimizer"])
+        if "epsilon" in state:
+            self.epsilon = state["epsilon"]
+        if "previous_distribution" in state:
+            self.previous_distribution = state.get("previous_distribution", None)
 
     def _encode(self, state: torch.Tensor, adjacency: torch.Tensor | None = None) -> torch.Tensor:
         if state.ndim in (2, 3) and state.shape[-1] == 6:
@@ -164,8 +198,6 @@ class DDQNAgent:
                 values = self._q_values(torch.as_tensor(state, dtype=torch.float32), adjacency)[0].cpu().numpy()
             values[~mask] = -np.inf
             action = int(np.argmax(values))
-        if explore:
-            self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
         return action
 
     def learn(self, batch, adjacency: torch.Tensor | None = None) -> float:
@@ -186,6 +218,7 @@ class DDQNAgent:
         loss = nn.functional.mse_loss(current, target)
         self.optimizer.zero_grad()
         loss.backward()
+        nn.utils.clip_grad_norm_([p for group in self.optimizer.param_groups for p in group["params"]], max_norm=10.0)
         self.optimizer.step()
         return float(loss.item())
 

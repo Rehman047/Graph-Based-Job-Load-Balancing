@@ -72,6 +72,10 @@ class GNNDQNAgent(DDQNAgent):
         self.target_network = self.q_network
         return super().learn(batch, adjacency)
 
+    def load_state(self, state: dict) -> None:
+        super().load_state(state)
+        self.target_network = self.q_network
+
 
 MLPDDQN = MLPAgent
 GNNDQN = GNNDQNAgent
