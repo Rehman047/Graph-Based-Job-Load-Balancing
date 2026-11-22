@@ -53,8 +53,8 @@ def train(
         ep_elapsed = time.perf_counter() - ep_start
         rewards.append(episode_reward)
         waiting.append(avg_waiting_time(cluster.jobs))
-        if (ep + 1) % 10 == 0 or episodes < 10 or (ep + 1) == episodes:
-            print(f"Episode {ep + 1}/{episodes} took {ep_elapsed:.2f}s | Reward: {episode_reward:.2f} | Avg Wait: {waiting[-1]:.4f}")
+        if (ep + 1) % 10 == 0 or episodes <= 10:
+            print(f"Episode {ep + 1}/{episodes} took {ep_elapsed:.2f}s | Reward: {episode_reward:.2f} | Avg Wait: {waiting[-1]:.4f}", flush=True)
     return rewards, waiting
 
 
