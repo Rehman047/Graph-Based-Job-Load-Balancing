@@ -9,7 +9,41 @@ import torch
 from torch import nn
 
 
-def build_adjacency(state: np.ndarray, alpha: float = 0.4, beta: float = 0.3, gamma: float = 0.3) -> torch.Tensor:
+def build_adjacency_batch(
+    state: torch.Tensor | np.ndarray,
+    alpha: float = 0.4,
+    beta: float = 0.3,
+    gamma: float = 0.3,
+) -> torch.Tensor:
+    """Compute normalized adjacency matrices for a batch of states (batch, N, 6) -> (batch, N, N)."""
+    if isinstance(state, np.ndarray):
+        state = torch.as_tensor(state, dtype=torch.float32)
+    else:
+        state = state.float()
+
+    utilization = state[..., :3]
+    distance = torch.abs(utilization.unsqueeze(2) - utilization.unsqueeze(1))
+    denom = 1.0 + alpha * distance[..., 0] + beta * distance[..., 1] + gamma * distance[..., 2]
+    adjacency = 1.0 / denom
+
+    batch_size, n, _ = state.shape
+    eye = torch.eye(n, dtype=adjacency.dtype, device=adjacency.device).unsqueeze(0)
+    adjacency = adjacency * (1.0 - eye) + eye
+
+    degree = adjacency.sum(dim=-1)
+    degree_outer = degree.unsqueeze(-1) * degree.unsqueeze(-2)
+    normalized = adjacency / torch.sqrt(degree_outer.clamp(min=1e-12))
+    return normalized
+
+
+def build_adjacency(
+    state: np.ndarray | torch.Tensor,
+    alpha: float = 0.4,
+    beta: float = 0.3,
+    gamma: float = 0.3,
+) -> torch.Tensor:
+    if (isinstance(state, torch.Tensor) and state.ndim == 3) or (isinstance(state, np.ndarray) and state.ndim == 3):
+        return build_adjacency_batch(state, alpha, beta, gamma)
     state = np.asarray(state, dtype=np.float32)
     utilization = state[:, :3]
     distance = np.abs(utilization[:, None, :] - utilization[None, :, :])
@@ -31,6 +65,8 @@ class GraphConvolution(nn.Module):
         nn.init.xavier_uniform_(self.weight)
 
     def forward(self, x: torch.Tensor, adjacency: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 3 and adjacency.ndim == 3:
+            return torch.bmm(adjacency, x) @ self.weight
         return adjacency @ x @ self.weight
 
 
@@ -42,6 +78,8 @@ class GNNEncoder(nn.Module):
         self.output = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x: torch.Tensor, adjacency: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 3 and adjacency.ndim == 2:
+            adjacency = adjacency.unsqueeze(0).expand(x.shape[0], -1, -1)
         x = torch.relu(self.conv1(x, adjacency))
         x = torch.relu(self.conv2(x, adjacency))
         return self.output(x)
@@ -101,13 +139,11 @@ class DDQNAgent:
                     adjacency = build_adjacency(state.detach().cpu().numpy())
                 state = self.encoder(state, adjacency)
             else:
-                encoded = []
-                for item in state:
-                    item_adjacency = adjacency
-                    if item_adjacency is None:
-                        item_adjacency = build_adjacency(item.detach().cpu().numpy())
-                    encoded.append(self.encoder(item, item_adjacency))
-                state = torch.stack(encoded)
+                if adjacency is None:
+                    adjacency = build_adjacency_batch(state)
+                elif adjacency.ndim == 2:
+                    adjacency = adjacency.unsqueeze(0).expand(state.shape[0], -1, -1)
+                state = self.encoder(state, adjacency)
         return state
 
     def _network_input(self, state: torch.Tensor) -> torch.Tensor:

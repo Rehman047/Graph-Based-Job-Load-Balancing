@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import argparse
+import time
 import pandas as pd
 
 from .baselines import GNNDQNAgent, MLPAgent, RandomScheduler, RoundRobin, SJF
@@ -14,9 +15,18 @@ def _job(row) -> Job:
     return Job(float(row.gpu), float(row.cpu), float(row.mem), float(row.duration), float(row.get("arrival_time", 0)))
 
 
-def train(jobs: pd.DataFrame, cluster: GPUCluster, encoder, agent: DDQNAgent, replay_buffer: ReplayBuffer, episodes: int = 1000):
+def train(
+    jobs: pd.DataFrame,
+    cluster: GPUCluster,
+    encoder,
+    agent: DDQNAgent,
+    replay_buffer: ReplayBuffer,
+    episodes: int = 1000,
+    train_freq: int = 8,
+):
     rewards, waiting = [], []
-    for _ in range(episodes):
+    for ep in range(episodes):
+        ep_start = time.perf_counter()
         cluster.reset()
         episode_reward = 0.0
         for position, (_, row) in enumerate(jobs.iterrows()):
@@ -33,13 +43,18 @@ def train(jobs: pd.DataFrame, cluster: GPUCluster, encoder, agent: DDQNAgent, re
             reward = 0.6 * (1 - s_dolb(next_state)) + 0.4 * waiting_component
             if action is not None:
                 replay_buffer.push(state, action, reward, next_state, position == len(jobs) - 1)
-            if len(replay_buffer) >= 256:
+            # Standard DRL practice: update every K steps (train_freq) rather than every step.
+            # Documented deviation from the paper's Algorithm 2 to significantly improve training speed.
+            if len(replay_buffer) >= 256 and position % train_freq == 0:
                 agent.learn(replay_buffer.sample())
             agent.maybe_update_target(next_state)
             episode_reward += reward
         cluster.run()
+        ep_elapsed = time.perf_counter() - ep_start
         rewards.append(episode_reward)
         waiting.append(avg_waiting_time(cluster.jobs))
+        if (ep + 1) % 10 == 0 or episodes <= 10:
+            print(f"Episode {ep + 1}/{episodes} took {ep_elapsed:.2f}s | Reward: {episode_reward:.2f} | Avg Wait: {waiting[-1]:.4f}", flush=True)
     return rewards, waiting
 
 
@@ -79,12 +94,17 @@ def evaluate(scheduler, jobs: pd.DataFrame, cluster: GPUCluster, collect_utiliza
     return metrics, utilization
 
 
-def _methods(num_vms):
-    return {
+def _methods(num_vms, only_agent: str | None = None):
+    all_methods = {
         "GNN-DDQN": DDQNAgent(num_vms=num_vms),
         "MLP-DDQN": MLPAgent(num_vms=num_vms),
         "GNN-DQN": GNNDQNAgent(num_vms=num_vms),
     }
+    if only_agent:
+        if only_agent not in all_methods:
+            raise ValueError(f"Unknown agent '{only_agent}'. Allowed: {list(all_methods.keys())}")
+        return {only_agent: all_methods[only_agent]}
+    return all_methods
 
 
 def _evaluate_methods(jobs, cluster, agents, collect_utilization=False):
@@ -105,11 +125,20 @@ def _evaluate_methods(jobs, cluster, agents, collect_utilization=False):
     return (results, utilization) if collect_utilization else results
 
 
-def _train_methods(jobs, cluster, episodes):
-    agents = _methods(len(cluster.vms))
+def _train_methods(jobs, cluster, episodes, train_freq: int = 8, only_agent: str | None = None):
+    agents = _methods(len(cluster.vms), only_agent=only_agent)
     histories = {}
     for name, agent in agents.items():
-        rewards, waits = train(jobs, cluster, agent.encoder, agent, ReplayBuffer(), episodes)
+        print(f"\n--- Training {name} for {episodes} episodes (train_freq={train_freq}) ---")
+        rewards, waits = train(
+            jobs,
+            cluster,
+            agent.encoder,
+            agent,
+            ReplayBuffer(),
+            episodes,
+            train_freq=train_freq,
+        )
         histories[name] = (rewards, waits)
     return agents, histories
 
@@ -118,7 +147,16 @@ def _priority_jobs(jobs):
     return jobs.sort_values("gpu", ascending=False, kind="stable").reset_index(drop=True)
 
 
-def run_experiments(normal, intensive, episodes=1000, vm_counts=(10, 20, 30), output_dir="experiments/results"):
+def run_experiments(
+    normal,
+    intensive,
+    episodes: int = 1000,
+    vm_counts=(10, 20, 30),
+    output_dir: str = "experiments/results",
+    workload: str = "all",
+    only_agent: str | None = None,
+    train_freq: int = 8,
+):
     from .plots import (
         plot_reward_convergence,
         plot_utilization_bars,
@@ -130,9 +168,22 @@ def run_experiments(normal, intensive, episodes=1000, vm_counts=(10, 20, 30), ou
     output.mkdir(parents=True, exist_ok=True)
     all_results = {}
     all_histories = {}
-    for workload_name, jobs in (("normal", normal), ("intensive", intensive)):
+
+    workload_configs = []
+    if workload in ("normal", "all"):
+        workload_configs.append(("normal", normal))
+    if workload in ("intensive", "all"):
+        workload_configs.append(("intensive", intensive))
+
+    for workload_name, jobs in workload_configs:
         cluster = GPUCluster()
-        agents, histories = _train_methods(jobs, cluster, episodes)
+        agents, histories = _train_methods(
+            jobs,
+            cluster,
+            episodes,
+            train_freq=train_freq,
+            only_agent=only_agent,
+        )
         results, utilization = _evaluate_methods(jobs, cluster, agents, collect_utilization=True)
         all_results[workload_name] = results
         all_histories[workload_name] = histories
@@ -150,22 +201,66 @@ def run_experiments(normal, intensive, episodes=1000, vm_counts=(10, 20, 30), ou
         pd.DataFrame(priority_results).T.to_csv(output / f"{workload_name}_gpu_priority.csv")
 
     generalization = {}
-    for count in vm_counts:
-        cluster = GPUCluster(n_per_type=count)
-        agents, _ = _train_methods(normal, cluster, episodes)
-        generalization[count] = _evaluate_methods(normal, cluster, agents)
-    pd.Series(generalization).to_json(output / "generalization.json")
+    if workload in ("generalization", "all"):
+        for count in vm_counts:
+            print(f"\n--- Generalization experiment with {count} VMs per tier ---")
+            cluster = GPUCluster(n_per_type=count)
+            agents, _ = _train_methods(
+                normal,
+                cluster,
+                episodes,
+                train_freq=train_freq,
+                only_agent=only_agent,
+            )
+            generalization[count] = _evaluate_methods(normal, cluster, agents)
+        pd.Series(generalization).to_json(output / "generalization.json")
     return all_results, all_histories, generalization
 
 
-def main(episodes=1000):
+def main(
+    episodes: int = 1000,
+    workload: str = "all",
+    only_agent: str | None = None,
+    train_freq: int = 8,
+):
     from .data_loader import load_traces
 
-    return run_experiments(*load_traces(), episodes=episodes)
+    return run_experiments(
+        *load_traces(),
+        episodes=episodes,
+        workload=workload,
+        only_agent=only_agent,
+        train_freq=train_freq,
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train and evaluate all scheduling experiments.")
     parser.add_argument("--episodes", type=int, default=1000)
+    parser.add_argument(
+        "--workload",
+        type=str,
+        choices=["normal", "intensive", "generalization", "all"],
+        default="all",
+        help="Workload to run: normal, intensive, generalization, or all (default: all)",
+    )
+    parser.add_argument(
+        "--only-agent",
+        type=str,
+        choices=["GNN-DDQN", "MLP-DDQN", "GNN-DQN"],
+        default=None,
+        help="Run only the specified agent (default: run all three)",
+    )
+    parser.add_argument(
+        "--train-freq",
+        type=int,
+        default=8,
+        help="Update policy network every K jobs (default: 8)",
+    )
     args = parser.parse_args()
-    main(episodes=args.episodes)
+    main(
+        episodes=args.episodes,
+        workload=args.workload,
+        only_agent=args.only_agent,
+        train_freq=args.train_freq,
+    )
