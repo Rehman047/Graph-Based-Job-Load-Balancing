@@ -578,6 +578,8 @@ def main(
     eval_every: int = 25,
     seed: int = 42,
     checkpoint_dir: str = "checkpoints",
+    synthetic: bool = False,
+    baselines_only: bool = False,
 ):
     random.seed(seed)
     np.random.seed(seed)
@@ -585,8 +587,24 @@ def main(
 
     from .data_loader import load_traces
 
+    normal, intensive = load_traces(synthetic=synthetic)
+
+    if baselines_only:
+        from .plots import print_results_table
+        cluster = GPUCluster()
+        baselines = {"RR": RoundRobin(), "Random": RandomScheduler(), "SJF": SJF()}
+        for name, jobs in [("Normal", normal), ("Intensive", intensive)]:
+            print(f"\n{name} workload baselines:")
+            results = {
+                b_name: dict(zip(("s_dolb", "bsld", "avg_waiting_time"), evaluate(b_agent, jobs, cluster)))
+                for b_name, b_agent in baselines.items()
+            }
+            print_results_table(results)
+        return
+
     return run_experiments(
-        *load_traces(),
+        normal,
+        intensive,
         episodes=episodes,
         workload=workload,
         only_agent=only_agent,
@@ -659,6 +677,18 @@ if __name__ == "__main__":
         default="checkpoints",
         help="Directory to save checkpoints (default: checkpoints)",
     )
+    parser.add_argument(
+        "--synthetic",
+        action="store_true",
+        default=False,
+        help="Use synthetic workload generator instead of real Alibaba traces",
+    )
+    parser.add_argument(
+        "--baselines-only",
+        action="store_true",
+        default=False,
+        help="Run only baselines (RR, Random, SJF) without training",
+    )
     args = parser.parse_args()
     main(
         episodes=args.episodes,
@@ -671,4 +701,6 @@ if __name__ == "__main__":
         eval_every=args.eval_every,
         seed=args.seed,
         checkpoint_dir=args.checkpoint_dir,
+        synthetic=args.synthetic,
+        baselines_only=args.baselines_only,
     )
